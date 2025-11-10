@@ -1,169 +1,98 @@
-# -*- coding: utf-8 -*-
-"""
-HINOMARU SEMICONDUCTOR Index (等金額加重・Intraday)
-"""
-import os
-import json
-from datetime import datetime
-from typing import Dict, List
-
-import numpy as np
+# src/hinosemi_snapshot.py
+from __future__ import annotations
 import pandas as pd
+import numpy as np
+from datetime import datetime, timezone, timedelta
 import yfinance as yf
+from pathlib import Path
 
-KEY = "HINOSEMI"
-OUT_DIR = "docs/outputs"
+OUT_DIR = Path("docs/outputs")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-JP_TICKERS: Dict[str, str] = {
-    "8035.T": "東京エレクトロン",
-    "6857.T": "アドバンテスト",
-    "285A.T": "キオクシア",       # 2024/12/18 上場
-    "6920.T": "レーザーテック",
-    "6146.T": "ディスコ",
-    "6526.T": "ソシオネクスト",
-    "6723.T": "ルネサスエレクトロニクス",
-}
+# ✅ 正規メンバーを固定（順序も固定）
+MEMBERS = [
+    "8035.T",  # 東京エレクトロン
+    "6857.T",  # アドバンテスト
+    "285A.T",  # キオクシア
+    "6920.T",  # レーザーテック
+    "6146.T",  # ディスコ
+    "6526.T",  # ソシオネクスト
+    "6723.T",  # ルネサス
+]
 
-# ---------- helpers ----------
 def _now_jst():
-    return pd.Timestamp.now(tz="Asia/Tokyo").to_pydatetime()
+    return datetime.now(timezone(timedelta(hours=9)))
 
-def _to_jst_index(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    return df.tz_convert("Asia/Tokyo").rename_axis("datetime_jst")
+def _download_intraday(tickers: list[str]) -> pd.DataFrame:
+    # 1分足/当日分に相当する履歴を取得（なくても NaN で返る）
+    data = yf.download(
+        tickers=tickers,
+        interval="1m",
+        period="1d",
+        group_by="ticker",
+        auto_adjust=False,
+        threads=True,
+        progress=False,
+    )
 
-def _flatten_multiindex(df: pd.DataFrame) -> pd.DataFrame:
-    if not isinstance(df.columns, pd.MultiIndex):
-        return df
-    want = ["open", "high", "low", "close", "adj close", "volume"]
-    out = pd.DataFrame(index=df.index)
-    low0 = [tuple(map(lambda x: str(x).lower(), c)) for c in df.columns]
-    for name in want:
-        for col, low in zip(df.columns, low0):
-            if low[0] == name:
-                out[name.title() if name != "adj close" else "Adj Close"] = df[col]
-                break
-    return out
-
-def _standardize_ohlc(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df = _flatten_multiindex(df)
-    mapping = {c: str(c).lower().strip() for c in df.columns}
-    df = df.rename(columns=mapping)
-    if "adj close" not in df.columns and "adjclose" in df.columns:
-        df["adj close"] = df["adjclose"]
-    rename_back = {}
-    for c in df.columns:
-        if c == "adj close":
-            rename_back[c] = "Adj Close"
-        else:
-            rename_back[c] = c.title()
-    df = df.rename(columns=rename_back)
-    if "Close" not in df.columns and "Adj Close" in df.columns:
-        df["Close"] = df["Adj Close"]
-    need = {"Open", "Close"}
-    if not need.issubset(set(df.columns)):
-        return pd.DataFrame()
-    df["Ticker"] = ticker
-    df = _to_jst_index(df)
-    for col in ["Open", "Close"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df[["Open", "Close", "Ticker"]].dropna(how="any")
-
-def _download_one(ticker: str) -> pd.DataFrame:
-    for interval in ("5m", "15m"):
-        try:
-            raw = yf.download(
-                ticker, period="1d", interval=interval,
-                auto_adjust=False, progress=False, threads=False
-            )
-        except Exception:
-            raw = pd.DataFrame()
-        df = _standardize_ohlc(raw, ticker)
-        if not df.empty:
-            return df
-    return pd.DataFrame()
-
-def fetch_prices(tickers: List[str]) -> pd.DataFrame:
+    # yfinance の戻りをフラット化: (Datetime, Ticker) の MultiIndex に統一
     frames = []
     for t in tickers:
-        df = _download_one(t)
-        if not df.empty:
-            frames.append(df)
+        # 取得できない銘柄は空→落ちないように握りつぶす
+        if (t in data) and ("Open" in data[t]) and ("Close" in data[t]):
+            df_t = data[t][["Open", "Close"]].copy()
+            df_t.columns = pd.MultiIndex.from_product([[t], df_t.columns])
+            frames.append(df_t)
     if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames).sort_index()
+        # 何も取れない場合でも後段が落ちないように空の DataFrame を返す
+        return pd.DataFrame(columns=pd.MultiIndex.from_product([tickers, ["Open","Close"]]))
 
-def build_intraday_series(raw: pd.DataFrame) -> pd.Series:
-    if raw.empty:
-        raise RuntimeError("no prices at all")
-    need = {"Open", "Close", "Ticker"}
-    if not need.issubset(set(raw.columns)):
-        missing = need - set(raw.columns)
-        raise RuntimeError(f"missing columns: {missing}")
-    series_list = []
-    for t, df1 in raw.groupby("Ticker"):
-        base = df1["Open"].dropna()
-        if base.empty:
-            continue
-        base = float(base.iloc[0])
-        if not np.isfinite(base) or base == 0:
-            continue
-        s = (df1["Close"].astype(float) / base - 1.0) * 100.0
-        s.name = t
-        series_list.append(s)
-    if not series_list:
-        raise RuntimeError("no valid series after cleaning")
-    mat = pd.concat(series_list, axis=1).sort_index()
-    avg = mat.mean(axis=1, skipna=True).ffill().dropna()
-    if avg.empty:
-        raise RuntimeError("no prices after ffill")
-    return avg
+    df = pd.concat(frames, axis=1).sort_index()
+    return df
 
-def save_outputs(series: pd.Series, tickers: List[str]) -> None:
-    # ★ 出力先フォルダを必ず作成
-    os.makedirs(OUT_DIR, exist_ok=True)
+def build_intraday_series() -> pd.DataFrame:
+    raw = _download_intraday(MEMBERS)
 
-    series = series.copy()
-    series.name = "ret"
-    (series.to_frame()
-           .to_csv(f"{OUT_DIR}/hinosemi_intraday.csv", index_label="datetime_jst"))
+    # Open/Close をピボットしやすい形へ
+    # index: Datetime, columns: (Ticker, Field)
+    df = raw.copy()
+    # Open が 0 や NaN は除外（割り算回避）
+    open_ = df.xs("Open", axis=1, level=1)
+    close_ = df.xs("Close", axis=1, level=1)
+    pct_vs_open = (close_ - open_) / open_
+    # 列は Ticker、index は Datetime
+    pct_vs_open.index.name = "datetime"
 
-    last_pct = float(series.iloc[-1])
+    # 今日日中（JST）に絞る（なくても可）
+    jst = _now_jst()
+    today_jst = jst.date()
+    pct_vs_open = pct_vs_open[pct_vs_open.index.tz_localize(None).date == today_jst]
+
+    # 可視化・CSV 用に保存
+    return pct_vs_open
+
+def save_outputs(pct: pd.DataFrame):
+    # CSV（可視化用デバッグ）
+    csv_path = OUT_DIR / "hinosemi_intraday.csv"
+    pct.to_csv(csv_path, index_label="datetime_jst")
+
+    # 統計（ポスト文やダッシュボード用）
+    last_pct = float(pct.iloc[-1].mean()) if (len(pct) > 0) else 0.0
     stats = {
-        "key": KEY,
-        "pct_intraday": round(last_pct, 2),
+        "key": "HINOSEMI",
+        "pct_intraday": round(last_pct * 100, 2),
         "updated_at": _now_jst().strftime("%Y/%m/%d %H:%M"),
         "unit": "pct",
-        "tickers": tickers,
+        # ✅ ここを“取得できた列”ではなく、必ず正規メンバーで書き出す
+        "tickers": MEMBERS,
     }
-    with open(f"{OUT_DIR}/hinosemi_stats.json", "w", encoding="utf-8") as f:
-        json.dump(stats, f, ensure_ascii=False, indent=2)
-
-    with open(f"{OUT_DIR}/last_run.txt", "w", encoding="utf-8") as f:
-        f.write(_now_jst().strftime("%Y/%m/%d %H:%M:%S"))
-
-    sign = "+" if last_pct >= 0 else ""
-    post = [
-        "【HINOSEMI｜日の丸半導体指数】",
-        f"本日: {sign}{last_pct:.2f}%",
-        f"構成: {','.join(tickers)}",
-        "#桜Index #HINOSEMI",
-    ]
-    with open(f"{OUT_DIR}/hinosemi_post_intraday.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(post))
+    (OUT_DIR / "hinosemi_stats.json").write_text(
+        pd.io.json.dumps(stats, force_ascii=False, indent=2)
+    )
 
 def main():
-    tickers = list(JP_TICKERS.keys())
-    raw = fetch_prices(tickers)
-    if raw.empty:
-        raise RuntimeError("no prices at all")
-    series = build_intraday_series(raw)
-    save_outputs(series, tickers)
+    pct = build_intraday_series()
+    save_outputs(pct)
 
 if __name__ == "__main__":
     main()
