@@ -13,7 +13,7 @@ def main():
         "【日の丸半導体指数】",
         f"本日：{pct:+.2f}%",
         f"指数：{last if last is not None else 'None'}",
-        "構成：8035/6857/6920/6146/6526/6723",
+        "構成：8035/6857/6920/6146/6526/6723/285A",
         "#桜Index #HinomaruSemi",
     ]
     with open(POST, "w", encoding="utf-8") as f:
