@@ -1,0 +1,28 @@
+name: HINOSEMI Long Charts
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r src/requirements.txt
+
+      # ここで長期PNG生成スクリプトを追加（必要なら）
+      - name: Commit charts
+        run: |
+          git add docs/outputs/*
+          git commit -m "chore(hinosemi): long charts" || echo "nothing to commit"
+          git push origin HEAD:main
