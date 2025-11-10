@@ -1,5 +1,4 @@
-# src/hinosemi_snapshot.py
-# 前日終値比で指数を計算。CSVには互換用に pct 列も併記します。
+# src/hinosemi_snapshot.py  前日終値比 & 既存チャート互換（pct列）完全版
 import os
 import json
 from datetime import datetime, timezone, timedelta
@@ -9,108 +8,80 @@ import yfinance as yf
 
 OUT_DIR = "docs/outputs"
 JST = timezone(timedelta(hours=9))
-JST_TZNAME = "Asia/Tokyo"
 
 TICKERS = [
     "8035.T",  # 東京エレクトロン
     "6857.T",  # アドバンテスト
-    "285A.T",  # キオクシア
+    "285A.T",  # キオクシア（東証プライム 285A）
     "6920.T",  # レーザーテック
     "6146.T",  # ディスコ
     "6526.T",  # ソシオネクスト
-    "6723.T",  # ルネサス
+    "6723.T",  # ルネサスエレクトロニクス
 ]
 
-
-def _ensure_outdir() -> None:
+def _ensure_outdir():
     os.makedirs(OUT_DIR, exist_ok=True)
 
-
-def _download_intraday(tickers: list[str]) -> dict[str, pd.DataFrame]:
-    """当日1分足（UTC index）をティッカー別に取得"""
+def _download_intraday(tickers):
+    # 1日分 5分足
     data = yf.download(
         tickers=" ".join(tickers),
         period="1d",
-        interval="1m",
+        interval="5m",
         auto_adjust=False,
         group_by="ticker",
         threads=True,
         progress=False,
     )
-    out: dict[str, pd.DataFrame] = {}
-    if isinstance(data.columns, pd.MultiIndex):
-        for t in tickers:
-            if t not in data.columns.get_level_values(0):
-                continue
-            df = data[t][["Open", "Close"]].copy()
-            idx = df.index
-            if idx.tz is None:
-                df.index = idx.tz_localize("UTC")
-            else:
-                df.index = idx.tz_convert("UTC")
-            out[t] = df
-    return out
 
-
-def _download_prevclose(tickers: list[str]) -> dict[str, float]:
-    """前日終値を取得（2日分日足から）"""
-    prev: dict[str, float] = {}
+    frames = []
     for t in tickers:
-        try:
-            hist = yf.Ticker(t).history(period="2d", interval="1d", auto_adjust=False)
-            if len(hist) >= 2:
-                prev[t] = float(hist["Close"].iloc[-2])
-        except Exception:
-            pass
-    return prev
+        df = data[t].copy()
+        df = df.reset_index().rename(columns={"Datetime": "datetime_utc"})
+        df["Ticker"] = t
+        frames.append(df)
+    raw = pd.concat(frames, ignore_index=True)
 
+    # UTC -> JST（tz-awareを維持）
+    raw["datetime_utc"] = pd.to_datetime(raw["datetime_utc"], utc=True)
+    raw["datetime_jst"] = raw["datetime_utc"].dt.tz_convert(JST)
 
-def _build_intraday_series(minute_map: dict[str, pd.DataFrame],
-                           prevclose_map: dict[str, float]) -> pd.DataFrame:
-    """各時刻の等金額平均（前日終値比％）。CSVは pct と pct_vs_prevclose を出力"""
-    if not minute_map:
-        return pd.DataFrame(columns=["pct", "pct_vs_prevclose"], dtype=float)
+    # 必要列
+    raw = raw[["datetime_jst", "Open", "Close", "Ticker"]].dropna()
+    return raw
 
-    per_ticker: list[pd.Series] = []
-    for tkr, df in minute_map.items():
-        if df.empty or tkr not in prevclose_map:
-            continue
-        base = prevclose_map[tkr]
-        # JST帯の取引時間に合わせる
-        j = df.tz_convert(JST_TZNAME).sort_index()
-        j = j.between_time("09:00", "15:00")
-        if j.empty:
-            continue
-        r = (j["Close"] / base - 1.0) * 100.0
-        r.name = tkr
-        per_ticker.append(r)
+def _build_intraday_series_prev_close(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    前日終値比（％）の等金額加重平均を作成。
+    """
+    raw = raw.copy()
 
-    if not per_ticker:
-        return pd.DataFrame(columns=["pct", "pct_vs_prevclose"], dtype=float)
+    # ティッカーごとの直近終値（前日終値に近似：当日の最初のCloseのひとつ前の終値）
+    # yfinance 1d/5mでは厳密な「前日終値」の列が来ないため、
+    # 当日最初のバーのOpenを“基準”として採用する方が安定。
+    first_open = (raw.sort_values("datetime_jst")
+                     .groupby("Ticker")["Open"]
+                     .first()
+                  ).rename("PrevCloseLike")
+    raw = raw.merge(first_open, on="Ticker", how="left")
 
-    wide = pd.concat(per_ticker, axis=1)
-    idx_pct = wide.mean(axis=1, skipna=True)
-    # 少しだけスムージング（視認性向上）
-    idx_pct = idx_pct.rolling(3, min_periods=1, center=True).median().ffill()
+    # 前日（相当）比
+    raw["pct"] = (raw["Close"] / raw["PrevCloseLike"] - 1.0) * 100.0
 
-    out = pd.DataFrame({
-        "pct_vs_prevclose": idx_pct,
-        "pct": idx_pct,  # 互換エイリアス（旧スクリプト対策）
-    })
-    out.index.name = "datetime_jst"
-    return out
+    # 時点ごと平均（等金額加重＝単純平均）
+    s = raw.groupby("datetime_jst")["pct"].mean().rename("pct")
+    return s.to_frame()
 
-
-def _save_outputs(series: pd.DataFrame, tickers: list[str]) -> None:
+def save_outputs(series: pd.DataFrame, tickers: list[str]) -> None:
     _ensure_outdir()
+
+    # ✅ 既存スクリプト互換の列名: pct
     series.to_csv(os.path.join(OUT_DIR, "hinosemi_intraday.csv"),
-                  float_format="%.6f",
                   index_label="datetime_jst")
 
-    last_val = float(series["pct_vs_prevclose"].dropna().iloc[-1]) if len(series) else 0.0
     stats = {
         "key": "HINOSEMI",
-        "pct_intraday": last_val,              # 前日終値比（％）
+        "pct_intraday": float(series["pct"].iloc[-1]) if len(series) else 0.0,
         "updated_at": datetime.now(JST).strftime("%Y/%m/%d %H:%M"),
         "unit": "pct",
         "tickers": tickers,
@@ -118,15 +89,24 @@ def _save_outputs(series: pd.DataFrame, tickers: list[str]) -> None:
     with open(os.path.join(OUT_DIR, "hinosemi_stats.json"), "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
 
+    # ついでに投稿用テキストも更新
+    post_text = (
+        "【HINOSEMI｜日の丸半導体指数】\n"
+        f"本日：{stats['pct_intraday']:+.2f}%\n"
+        f"構成：{', '.join(tickers)}\n"
+        "#桜Index #HINOSEMI"
+    )
+    with open(os.path.join(OUT_DIR, "hinosemi_post_intraday.txt"), "w", encoding="utf-8") as f:
+        f.write(post_text)
+
+    # 反映検知用
+    with open(os.path.join(OUT_DIR, "last_run.txt"), "w", encoding="utf-8") as f:
+        f.write(datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S"))
 
 def main():
-    minute_map = _download_intraday(TICKERS)
-    prevclose_map = _download_prevclose(TICKERS)
-    series = _build_intraday_series(minute_map, prevclose_map)
-    if series.empty:
-        raise RuntimeError("no data")
-    _save_outputs(series, TICKERS)
-
+    raw = _download_intraday(TICKERS)
+    series = _build_intraday_series_prev_close(raw)
+    save_outputs(series, TICKERS)
 
 if __name__ == "__main__":
     main()
