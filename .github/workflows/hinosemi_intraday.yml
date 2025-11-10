@@ -2,7 +2,7 @@ name: HINOSEMI Intraday
 
 on:
   schedule:
-    - cron: "*/5 0-6 * * 1-5"      # JST 09:00-15:00 ≒ UTC 00:00-06:59 をざっくりカバー
+    - cron: '30 00-08 * * 1-5'   # JST 09:30〜17:30 の間に数回打つなら調整
   workflow_dispatch:
 
 permissions:
@@ -17,9 +17,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
 
-      - name: Pre-sync (rebase first)
+      - name: Pre-sync main (rebase first)
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -27,8 +28,10 @@ jobs:
           git checkout main
           git pull --rebase origin main
 
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
       - name: Install deps
         run: |
@@ -41,10 +44,13 @@ jobs:
       - name: Make intraday chart
         run: python scripts/make_intraday_chart.py
 
+      - name: Prepare X post text
+        run: python scripts/hinosemi_post_intraday.py
+
       - name: Commit & push (rebase autostash)
         run: |
           set -e
-          git add docs/outputs/*
+          git add docs/outputs/*.csv docs/outputs/*.json docs/outputs/*.png docs/outputs/*.txt || true
           git commit -m "chore(hinosemi): intraday snapshot" || echo "nothing to commit"
           git pull --rebase --autostash origin main
           git push origin HEAD:main
