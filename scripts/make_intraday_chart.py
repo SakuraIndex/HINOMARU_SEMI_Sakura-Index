@@ -1,77 +1,101 @@
-# scripts/make_intraday_chart.py  完全版
-# 既存指数と同じダークテーマ / ゼロ基準の塗り分け / 列名は自動検出（pct 優先）
-
+# scripts/make_intraday_chart.py
+# 前のデザイン（ダーク背景 + 0%基準の上下塗り分け + 2行タイトル）で intraday.png を描画する
 import os
-from datetime import timezone, timedelta, datetime
-
+from datetime import timezone, timedelta
 import pandas as pd
 import matplotlib.pyplot as plt
 
 JST = timezone(timedelta(hours=9))
-IN_CSV  = "docs/outputs/hinosemi_intraday.csv"   # リポ内パス（ジョブごとに同名想定）
-OUT_PNG = "docs/outputs/hinosemi_intraday.png"
+OUT_DIR = "docs/outputs"
 
-# ===== スタイル（既存と同等の見た目） =====
-BG      = "#0b1420"
-PANEL   = "#0f1b28"
-LINE    = "#7ee0f5"
-FILL    = "#17303d"    # 上側エリア
-FILL_NEG= "#3a2334"    # 下側エリア
-GRID    = "#1d3145"
-TEXT    = "#d4e9f7"
+# 環境やリポ名に依らず使えるようにスラグを自動推定
+# 例: HINOMARU_SEMI_Sakura-Index -> "hinosemi"
+def _guess_slug():
+    # docs/outputs 内の *_intraday.csv を1つ見つけてスラグ採用
+    if not os.path.isdir(OUT_DIR):
+        return "hinosemi"
+    cands = [f for f in os.listdir(OUT_DIR) if f.endswith("_intraday.csv")]
+    if cands:
+        return cands[0].replace("_intraday.csv", "")
+    return "hinosemi"
 
-def _pick_pct(df: pd.DataFrame) -> pd.Series:
-    # 優先順位で列を探す
-    for c in ["pct", "pct_vs_open", "pct_vs_prev_close", "change_pct", "Change"]:
+SLUG = _guess_slug().lower()
+CSV_PATH = os.path.join(OUT_DIR, f"{SLUG}_intraday.csv")
+PNG_PATH = os.path.join(OUT_DIR, f"{SLUG}_intraday.png")
+
+def _read_csv(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"not found: {path}")
+    df = pd.read_csv(path)
+    # datetime 列の候補（新旧対応）
+    for c in ["datetime_jst", "Datetime_jst", "datetime"]:
         if c in df.columns:
-            return df[c].astype(float)
-    raise RuntimeError("pct column not found")
+            df["datetime_jst"] = pd.to_datetime(df[c], utc=True, errors="coerce").dt.tz_convert(JST)
+            break
+    else:
+        raise RuntimeError("datetime_jst column not found")
+
+    # 騰落率列の候補（前終値基準があれば最優先）
+    pct_cols = ["pct_vs_close", "pct_vs_prevclose", "pct_vs_prev_close",
+                "pct_vs_open", "pct", "change_pct"]
+    for c in pct_cols:
+        if c in df.columns:
+            df["pct"] = pd.to_numeric(df[c], errors="coerce")
+            break
+    else:
+        raise RuntimeError("pct column not found")
+
+    df = df[["datetime_jst", "pct"]].dropna().sort_values("datetime_jst")
+    df = df.set_index("datetime_jst")
+    return df
+
+def _style_axes(ax):
+    # 背景色など（前デザインに寄せる）
+    ax.set_facecolor("#0f1b28")  # パネル
+    ax.figure.set_facecolor("#0b1420")  # 背景
+    # スパイン／グリッド
+    for sp in ax.spines.values():
+        sp.set_color("#1c2a3a")
+    ax.grid(True, color="#1c2a3a", linewidth=0.8, alpha=0.6)
+    ax.tick_params(colors="#d4e9f7")
+    ax.yaxis.label.set_color("#d4e9f7")
+    ax.xaxis.label.set_color("#d4e9f7")
 
 def main():
-    df = pd.read_csv(IN_CSV)
-    # インデックス
-    idx_name = "datetime_jst" if "datetime_jst" in df.columns else df.columns[0]
-    df[idx_name] = pd.to_datetime(df[idx_name], utc=True).dt.tz_convert(JST)
+    df = _read_csv(CSV_PATH)
+    if df.empty:
+        raise RuntimeError("no data to plot")
 
-    y = _pick_pct(df)
-    t = df[idx_name]
+    x = df.index
+    y = df["pct"].astype(float)
 
-    # ===== 描画 =====
-    plt.figure(figsize=(13.5, 7.2), dpi=120)
-    ax = plt.gca()
-    ax.set_facecolor(PANEL)
-    plt.gcf().patch.set_facecolor(BG)
+    # 図・軸
+    fig = plt.figure(figsize=(13.5, 7.6), dpi=110)
+    ax = fig.add_subplot(111)
+    _style_axes(ax)
 
-    # 0% 基準線
-    ax.axhline(0, color=GRID, linewidth=1)
+    # 0% 基準で塗り分け（上：ティール、下：ワイン）
+    ax.fill_between(x, 0, y, where=(y >= 0), color="#1f6b6b", alpha=0.35, linewidth=0)
+    ax.fill_between(x, 0, y, where=(y < 0),  color="#5a2b46", alpha=0.35, linewidth=0)
 
-    # フィル（上側／下側で色を分ける）
-    ax.fill_between(t, 0, y, where=(y >= 0), alpha=0.6, facecolor=FILL, linewidth=0)
-    ax.fill_between(t, 0, y, where=(y < 0),  alpha=0.6, facecolor=FILL_NEG, linewidth=0)
+    # ライン（シアン系・やや太め）
+    ax.plot(x, y, color="#9be7ee", linewidth=2.0)
 
-    # ライン
-    ax.plot(t, y, linewidth=2.2, color=LINE)
+    # 0% ラインを薄く
+    ax.axhline(0, color="#1c2a3a", linewidth=1.0)
 
-    # 軸など
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color(GRID)
-    ax.spines["bottom"].set_color(GRID)
-    ax.tick_params(colors=TEXT, labelsize=10)
-    ax.grid(color=GRID, alpha=0.35, linewidth=0.8, axis="y")
+    # 軸ラベル（前終値基準）
+    ax.set_ylabel("Change vs Prev Close (%)")
 
-    ax.set_ylabel("Change vs Prev Close (%)", color=TEXT)
-    ax.set_xlabel("")
-    ax.set_title(
-        f"HINOSEMI Intraday Snapshot (JST)\n{datetime.now(JST):%Y/%m/%d}",
-        color=TEXT, pad=14, fontsize=16, weight="bold"
-    )
+    # 2行タイトル（JST + 日付）
+    day_str = x[-1].astimezone(JST).strftime("%Y/%m/%d")
+    title_top = f"{SLUG.upper()} Intraday Snapshot (JST)"
+    ax.set_title(f"{title_top}\n{day_str}", color="#d4e9f7", fontsize=16, pad=12)
 
-    # マージン
-    plt.tight_layout()
-    os.makedirs(os.path.dirname(OUT_PNG), exist_ok=True)
-    plt.savefig(OUT_PNG, facecolor=BG, edgecolor=BG, bbox_inches="tight")
-    plt.close()
+    # 余白と保存
+    fig.tight_layout()
+    fig.savefig(PNG_PATH, bbox_inches="tight")
+    plt.close(fig)
 
 if __name__ == "__main__":
     main()
