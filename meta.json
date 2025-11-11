@@ -1,0 +1,21 @@
+{
+  "index_key": "HINONOMI-SEMIS",
+  "label": "日の丸半導体",
+  "category": "国内半導体コア",
+  "description": "日本を代表する半導体製造装置/設計/素材のコア銘柄で構成。前工程/後工程の装置大手と設計注力企業を中心に選定。",
+  "method": {
+    "weighting": "equal",
+    "rebalancing": "quarterly",
+    "calc": "intraday percent vs prev_close",
+    "notes": "大型の装置比率が高い指数。IPOや指定替えは適宜見直し。"
+  },
+  "components": [
+    { "ticker": "8035", "exchange": "TSE Prime", "name_ja": "東京エレクトロン", "weight": 0.1429 },
+    { "ticker": "6857", "exchange": "TSE Prime", "name_ja": "アドバンテスト", "weight": 0.1429 },
+    { "ticker": "285A", "exchange": "TSE Prime", "name_ja": "キオクシアホールディングス", "weight": 0.1429, "note": "新規上場 銘柄コード末尾A" },
+    { "ticker": "6920", "exchange": "TSE Prime", "name_ja": "レーザーテック", "weight": 0.1429 },
+    { "ticker": "6146", "exchange": "TSE Prime", "name_ja": "ディスコ", "weight": 0.1429 },
+    { "ticker": "6526", "exchange": "TSE Prime", "name_ja": "ソシオネクスト", "weight": 0.1429 },
+    { "ticker": "6723", "exchange": "TSE Prime", "name_ja": "ルネサスエレクトロニクス", "weight": 0.1429 }
+  ]
+}
